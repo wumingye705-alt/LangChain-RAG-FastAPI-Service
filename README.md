@@ -117,7 +117,7 @@ flowchart TD
 ### 克隆项目
 
 ```bash
-git clone https://github.com/RMA-MUN/LangChain-RAG-FastAPI-Service.git
+git clone https://github.com/wumingye705-alt/LangChain-RAG-FastAPI-Service.git
 cd LangChain-RAG-FastAPI-Service
 ```
 
@@ -412,3 +412,7 @@ separators: ["\n\n", "\n", "。", "！", "？", "!", "?", " ", ""]
 ## 联系方式
 
 如有任何问题或建议，请随时联系我们。😊
+
+- GitHub repository: https://github.com/wumingye705-alt/LangChain-RAG-FastAPI-Service
+- GitHub profile: https://github.com/wumingye705-alt
+- Issues: https://github.com/wumingye705-alt/LangChain-RAG-FastAPI-Service/issues

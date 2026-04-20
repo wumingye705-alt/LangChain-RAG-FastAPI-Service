@@ -37,6 +37,7 @@ export const apiConfig = {
     // 向量数据库
     uploadSingleFile: '/api/vector/add/single',
     uploadMultipleFiles: '/api/vector/add/multiple',
+    listVectorFiles: '/api/vector/files',
     cleanVectors: '/api/vector/clean',
     
     // 文档重排序

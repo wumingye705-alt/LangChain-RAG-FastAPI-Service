@@ -20,13 +20,12 @@ class RagService:
         self.chain = self._init_chain()
         self.hyde_prompt_template = PromptTemplate.from_template("基于以下问题，生成一个详细的假设性回答，我会根据你的这个假设性回答在向量数据库里检索文档：\n\n问题：{query}\n\n假设性回答：")
 
-    async def initialize_retriever(self, query: str = None):
+    async def initialize_retriever(self, query: str = None, user_id: str = None):
         """
         初始化检索器
         :param query: 查询语句，用于动态调整权重
         """
-        if self.retriever is None:
-            self.retriever = await self.vector_store.get_retriever(query)
+        self.retriever = await self.vector_store.get_retriever(query, user_id=user_id)
 
 
     def _init_chain(self):
@@ -59,16 +58,16 @@ class RagService:
             return query
 
     @traceable
-    async def retrieve_document(self, query: str) -> list:
+    async def retrieve_document(self, query: str, user_id: str = None) -> list:
         """使用HyDE技术 从向量数据库里检索文档"""
         try:
             # 确保检索器已初始化，传递query参数
             if self.retriever is None:
-                await self.initialize_retriever(query)
+                await self.initialize_retriever(query, user_id=user_id)
             
             # 使用HyDE技术生成假设性文档
             logger.info(f"【HyDE】开始处理查询: {query}")
-            hypothetical_doc = await self.generate_hypothetical_document(query)
+            hypothetical_doc = query if user_id else await self.generate_hypothetical_document(query)
             
             # 使用假设性文档进行检索
             logger.info(f"【HyDE】使用假设性文档进行检索")
@@ -99,14 +98,14 @@ class RagService:
             return documents
 
     @traceable
-    async def get_documents_and_summary(self, query: str) -> dict:
+    async def get_documents_and_summary(self, query: str, user_id: str = None) -> dict:
         """
         获取文档列表和摘要
         :param query: 查询语句
         :return: 包含文档列表和摘要的字典
         """
         try:
-            documents = await self.retrieve_document(query)
+            documents = await self.retrieve_document(query, user_id=user_id)
 
             # 提取文档内容列表
             document_contents = [doc.page_content for doc in documents]
@@ -195,9 +194,9 @@ class RagService:
             }
 
     @traceable
-    async def rag_summary(self, query: str) -> str:
+    async def rag_summary(self, query: str, user_id: str = None) -> str:
         """RAG 摘要"""
-        result = await self.get_documents_and_summary(query)
+        result = await self.get_documents_and_summary(query, user_id=user_id)
         return result.get("summary", "抱歉，处理您的请求时出现了错误。")
 
 if __name__ == '__main__':

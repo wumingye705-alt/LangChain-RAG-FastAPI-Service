@@ -45,6 +45,9 @@ media/
 *.db
 *.sqlite3
 migrations/
+!DjangoUserService/apps/**/migrations/
+!DjangoUserService/apps/**/migrations/*.py
+!DjangoUserService/apps/**/migrations/__init__.py
 
 # Build artifacts
 build/

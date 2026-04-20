@@ -3,7 +3,7 @@ import uuid
 
 from fastapi.routing import APIRouter
 from fastapi import UploadFile, File, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 
 from app.agent.agent import get_agent_stream_response
 from app.router.chat_service import ChatService, get_router_service
@@ -40,11 +40,12 @@ async def query_stream(
 @chat_router.post("/rag/query", response_model=RAGResponse)
 async def query_rag(
         request: RAGRequest,
+        user_id: str = Depends(get_current_user_id),
         router_service: ChatService = Depends(get_router_service),
         _: None = Depends(rate_limit(limit=15, window=60))
 ):
     """RAG检索"""
-    response = await router_service.handle_rag_query(request.query)
+    response = await router_service.handle_rag_query(request.query, user_id)
     return success_response(data=RAGResponse(response=response))
 
 
@@ -107,6 +108,22 @@ async def clean_user_vectors(user_id: str = Depends(get_current_user_id), router
     """删除用户上传的所有向量"""
     await router_service.clean_user_upload(user_id)
     return success_response(message="已成功删除用户上传的所有向量")
+
+
+@chat_router.get("/vector/files")
+async def list_vector_files(user_id: str = Depends(get_current_user_id), router_service: ChatService = Depends(get_router_service)):
+    files = await router_service.handle_list_user_files(user_id)
+    return success_response(data={"files": files})
+
+
+@chat_router.get("/vector/files/{file_id}")
+async def get_vector_file(file_id: str, user_id: str = Depends(get_current_user_id), router_service: ChatService = Depends(get_router_service)):
+    record = await router_service.handle_get_user_file(user_id, file_id)
+    return FileResponse(
+        path=record["stored_path"],
+        filename=record.get("filename") or record.get("stored_filename") or file_id,
+        media_type="application/octet-stream",
+    )
 
 
 @chat_router.post("/reorder", response_model=ReorderResponse)

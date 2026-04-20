@@ -1,3 +1,4 @@
+import os
 import time
 from dotenv import load_dotenv
 
@@ -79,8 +80,14 @@ async def startup_event():
     logger.info("Redis连接初始化完成")
     
     # 检查并重排序模型
-    check_and_download_reranker_model()
-    logger.info("重排序模型检查完成")
+    #check_and_download_reranker_model()
+   # logger.info("重排序模型检查完成")
+
+    if os.getenv("ENABLE_RERANKER", "false").lower() == "true":
+        check_and_download_reranker_model()
+        logger.info("重排序模型检查完成")
+    else:
+        logger.info("跳过重排序模型启动检查，设置 ENABLE_RERANKER=true 可启用")
 
 @app.on_event("shutdown")
 async def shutdown_event():

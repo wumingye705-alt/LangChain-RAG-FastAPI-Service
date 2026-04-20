@@ -2,6 +2,10 @@ import asyncio
 import sys
 import os
 import tempfile
+import json
+import hashlib
+import shutil
+from datetime import datetime
 
 from langchain_classic.retrievers import EnsembleRetriever
 
@@ -39,6 +43,60 @@ class VectorStoreService:
             separators=chroma_config['separators'],
             embedding_model=embed_model
         )
+
+    def _user_upload_dir(self, user_id: str) -> str:
+        safe_user_id = "".join(ch for ch in str(user_id) if ch.isalnum() or ch in ("-", "_"))
+        return get_abstract_path(os.path.join("data", "uploads", safe_user_id))
+
+    def _user_registry_path(self, user_id: str) -> str:
+        return os.path.join(self._user_upload_dir(user_id), "files.json")
+
+    async def _read_user_registry(self, user_id: str) -> list[dict]:
+        registry_path = self._user_registry_path(user_id)
+        if not await aio_os.path.exists(registry_path):
+            return []
+        async with aiofiles.open(registry_path, "r", encoding="utf-8") as f:
+            raw = await f.read()
+        if not raw.strip():
+            return []
+        try:
+            data = json.loads(raw)
+            return data if isinstance(data, list) else []
+        except json.JSONDecodeError:
+            return []
+
+    async def _write_user_registry(self, user_id: str, files: list[dict]) -> None:
+        upload_dir = self._user_upload_dir(user_id)
+        await aio_os.makedirs(upload_dir, exist_ok=True)
+        async with aiofiles.open(self._user_registry_path(user_id), "w", encoding="utf-8") as f:
+            await f.write(json.dumps(files, ensure_ascii=False, indent=2))
+
+    async def save_uploaded_file_record(self, user_id: str, record: dict) -> None:
+        files = await self._read_user_registry(user_id)
+        files = [item for item in files if item.get("file_id") != record.get("file_id")]
+        files.insert(0, record)
+        await self._write_user_registry(user_id, files)
+
+    async def list_user_files(self, user_id: str) -> list[dict]:
+        files = await self._read_user_registry(user_id)
+        return [
+            {key: value for key, value in item.items() if key != "stored_path"}
+            for item in files
+        ]
+
+    async def get_user_file_record(self, user_id: str, file_id: str) -> dict | None:
+        files = await self._read_user_registry(user_id)
+        for item in files:
+            if item.get("file_id") == file_id:
+                stored_path = item.get("stored_path")
+                if stored_path and await aio_os.path.exists(stored_path):
+                    return item
+        return None
+
+    async def clear_user_files(self, user_id: str) -> None:
+        upload_dir = self._user_upload_dir(user_id)
+        if await aio_os.path.exists(upload_dir):
+            await asyncio.to_thread(shutil.rmtree, upload_dir, True)
 
     async def get_bm25_retriever(self):
         """
@@ -86,17 +144,23 @@ class VectorStoreService:
             documents.append(Document(page_content=doc, metadata=metadata))
         return documents
 
-    async def get_retriever(self, query: str = None):
+    async def get_retriever(self, query: str = None, user_id: str = None):
         """
         获取混合检索器（BM25 + 向量检索）
         :param query: 查询语句，用于动态调整权重
         :return: EnsembleRetriever实例或单独的向量检索器
         """
         # 创建向量检索器
+        search_kwargs = {'k': chroma_config['k']}
+        if user_id:
+            search_kwargs['filter'] = {"user_id": user_id}
+
         vector_retriever = self.vectors_store.as_retriever(
             search_type='similarity',
-            search_kwargs={'k': chroma_config['k']},
+            search_kwargs=search_kwargs,
         )
+        if user_id:
+            return vector_retriever
         # 创建BM25检索器
         bm25_retriever = await self.get_bm25_retriever()
         
@@ -216,18 +280,32 @@ class VectorStoreService:
         """
         # 确定要处理的文件列表
         file_paths = []
+        upload_records_by_path = {}
         if files:
             # 处理上传的文件
             for file in files:
                 # 创建临时文件，使用asyncio.to_thread 包裹
-                temp_file_path = await asyncio.to_thread(
-                    tempfile.NamedTemporaryFile,
-                    delete=False,
-                    suffix=os.path.splitext(file.filename)[1]
-                )
                 content = await file.read()
-                await asyncio.to_thread(temp_file_path.write, content)
-                file_paths.append(temp_file_path.name)
+                original_filename = os.path.basename(file.filename or "upload")
+                md5_hex = hashlib.md5(content).hexdigest()
+                extension = os.path.splitext(original_filename)[1]
+                stored_filename = f"{md5_hex[:16]}{extension}"
+                upload_dir = self._user_upload_dir(user_id or "anonymous")
+                await aio_os.makedirs(upload_dir, exist_ok=True)
+                stored_path = os.path.join(upload_dir, stored_filename)
+                async with aiofiles.open(stored_path, "wb") as f:
+                    await f.write(content)
+                file_paths.append(stored_path)
+                upload_records_by_path[stored_path] = {
+                    "file_id": md5_hex,
+                    "filename": original_filename,
+                    "stored_filename": stored_filename,
+                    "stored_path": stored_path,
+                    "download_url": f"/api/vector/files/{md5_hex}",
+                    "size": len(content),
+                    "indexed": False,
+                    "uploaded_at": datetime.now().isoformat(timespec="seconds"),
+                }
         else:
             # 从数据文件夹读取文件
             allowed_file_path: tuple[str] = await listdir_allowed_type(
@@ -239,10 +317,18 @@ class VectorStoreService:
         for file_path in file_paths:
             # 2. 计算MD5
             md5_hex = await get_file_md5_hex(file_path)
-            if await self.check_md5_hex(md5_hex):
+            md5_key = f"{user_id}:{md5_hex}" if files and user_id else md5_hex
+            upload_record = upload_records_by_path.get(file_path)
+            if upload_record and user_id:
+                await self.save_uploaded_file_record(user_id, upload_record)
+
+            if await self.check_md5_hex(md5_key):
+                if upload_record and user_id:
+                    upload_record["indexed"] = True
+                    await self.save_uploaded_file_record(user_id, upload_record)
                 logger.info(f"【向量数据库】文件 {file_path} 的md5值 {md5_hex} 已存在，跳过")
                 # 如果是临时文件，删除
-                if files:
+                if files and file_path not in upload_records_by_path:
                     try:
                         os.unlink(file_path)
                     except:
@@ -255,7 +341,7 @@ class VectorStoreService:
                 if not document:
                     logger.error(f"【向量数据库】文件 {file_path} 加载内容为空，跳过")
                     # 如果是临时文件，删除
-                    if files:
+                    if files and file_path not in upload_records_by_path:
                         try:
                             os.unlink(file_path)
                         except Exception as e:
@@ -267,7 +353,7 @@ class VectorStoreService:
                 if not document:
                     logger.error(f"【向量数据库】文件 {file_path} 切分内容为空，跳过")
                     # 如果是临时文件，删除
-                    if files:
+                    if files and file_path not in upload_records_by_path:
                         try:
                             os.unlink(file_path)
                         except:
@@ -278,16 +364,24 @@ class VectorStoreService:
                 if user_id:
                     for doc in document:
                         doc.metadata['user_id'] = user_id
+                        if upload_record:
+                            doc.metadata['file_id'] = upload_record["file_id"]
+                            doc.metadata['source_filename'] = upload_record["filename"]
+                            doc.metadata['stored_filename'] = upload_record["stored_filename"]
+                            doc.metadata['uploaded_at'] = upload_record["uploaded_at"]
 
                 # 6. 异步写入向量库
                 await asyncio.to_thread(self.vectors_store.add_documents, document)
+                if upload_record and user_id:
+                    upload_record["indexed"] = True
+                    await self.save_uploaded_file_record(user_id, upload_record)
 
                 # 6. 保存MD5
-                await self.save_md5_hex(md5_hex)
+                await self.save_md5_hex(md5_key)
                 logger.info(f"【向量数据库】文件 {file_path} 的md5值 {md5_hex} 已保存")
 
                 # 如果是临时文件，删除
-                if files:
+                if files and file_path not in upload_records_by_path:
                     try:
                         os.unlink(file_path)
                     except:
@@ -296,7 +390,7 @@ class VectorStoreService:
             except Exception as e:
                 logger.error(f"【向量数据库】文件 {file_path} 处理时出错: {e}")
                 # 如果是临时文件，删除
-                if files:
+                if files and file_path not in upload_records_by_path:
                     try:
                         os.unlink(file_path)
                     except:
