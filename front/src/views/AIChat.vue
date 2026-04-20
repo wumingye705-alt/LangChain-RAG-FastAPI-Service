@@ -1,563 +1,599 @@
 <template>
-  <div class="ai-chat-container">
-    <van-nav-bar 
-      title="AI问答" 
-      fixed 
-      right-text="会话" 
-      @click-right="goToSessions"
-    />
-    
-    <div class="chat-content">
-      <div class="messages-container" ref="messagesContainer">
-        <div 
-          v-for="(message, index) in messages" 
-          :key="index"
-          :class="['message', message.role === 'user' ? 'user-message' : 'ai-message']"
-        >
-          <div class="message-content">
-            <div v-if="message.role === 'assistant' && message.content === ''" class="typing-indicator">
-              <span></span>
-              <span></span>
-              <span></span>
-            </div>
-            <div v-else v-html="formatMessage(message.content)"></div>
+  <div class="app-shell">
+    <TabBar />
+
+    <main class="page chat-page">
+      <section class="chat-main panel">
+        <header class="chat-header">
+          <div>
+            <span class="eyebrow">RAG Assistant</span>
+            <h2>今天想查什么？</h2>
+            <p>支持流式回答、会话保存和知识库检索。</p>
           </div>
+          <div class="header-actions">
+            <button class="btn" @click="newChat">新会话</button>
+            <button class="btn" @click="router.push('/sessions')">会话列表</button>
+          </div>
+        </header>
+
+        <div ref="messagesEl" class="messages">
+          <article
+            v-for="message in messages"
+            :key="message.id"
+            :class="['message-row', message.role]"
+          >
+            <div class="avatar">{{ message.role === 'user' ? '你' : 'AI' }}</div>
+            <div class="bubble">
+              <div v-if="message.loading" class="typing">正在整理答案...</div>
+              <div v-else class="markdown" v-html="renderMarkdown(message.content)" />
+            </div>
+          </article>
         </div>
-      </div>
-      
-      <div class="input-container">
-        <van-field
-          v-model="userInput"
-          rows="1"
-          autosize
-          type="textarea"
-          placeholder="请输入问题..."
-          class="chat-input"
-          @keypress.enter.prevent="sendMessage"
-        />
-        <van-button 
-          type="primary" 
-          class="send-button" 
-          :disabled="isLoading || !userInput.trim()" 
-          @click="sendMessage"
-        >
-          发送
-        </van-button>
-      </div>
-    </div>
-    
-    <tab-bar />
+
+        <form class="composer" @submit.prevent="sendMessage">
+          <textarea
+            v-model="input"
+            class="field"
+            rows="3"
+            placeholder="输入问题，按 Ctrl + Enter 发送"
+            @keydown.ctrl.enter.prevent="sendMessage"
+          />
+          <div class="composer-footer">
+            <span>{{ statusText }}</span>
+            <button class="btn primary" type="submit" :disabled="loading || !input.trim()">
+              {{ loading ? '生成中' : '发送' }}
+            </button>
+          </div>
+        </form>
+      </section>
+
+      <aside class="right-rail">
+        <section class="panel knowledge-panel">
+          <div class="rail-body">
+            <div class="rail-title">
+              <div>
+                <h3>资料库</h3>
+                <p>上传后会写入后端向量库，当前页面记录最近上传。</p>
+              </div>
+              <strong>{{ uploadedFiles.length }}</strong>
+            </div>
+            <input ref="fileInput" type="file" multiple class="hidden-input" @change="uploadFiles" />
+            <button class="btn primary" :disabled="uploading" @click="fileInput?.click()">
+              {{ uploading ? '上传中' : '上传资料' }}
+            </button>
+            <button class="btn danger" @click="cleanVectors">清空向量库</button>
+            <div v-if="uploadedFiles.length" class="upload-list">
+              <div v-for="file in uploadedFiles" :key="file.id" class="upload-item">
+                <span>{{ file.name }}</span>
+                <small>{{ file.size }} · {{ file.time }} · {{ file.indexed ? '已入库' : '处理中' }}</small>
+                <button v-if="file.downloadUrl" class="file-link" type="button" @click="openUploadedFile(file)">
+                  查看原文件
+                </button>
+              </div>
+            </div>
+            <div v-else class="upload-empty">
+              还没有上传记录。支持 PDF、TXT、MD、PPTX、DOCX。
+            </div>
+          </div>
+        </section>
+
+        <section class="panel tips-panel">
+          <h3>提问模板</h3>
+          <button v-for="tip in tips" :key="tip" class="tip" @click="input = tip">{{ tip }}</button>
+        </section>
+      </aside>
+    </main>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, nextTick, watch } from 'vue';
-import { useRouter, useRoute } from 'vue-router';
-import TabBar from '../components/TabBar.vue';
-import { showToast } from 'vant';
-import { marked } from 'marked';
-import { markedHighlight } from 'marked-highlight';
-import DOMPurify from 'dompurify';
-import hljs from 'highlight.js';
-import 'highlight.js/styles/monokai-sublime.css';
-import 'highlight.js/lib/common';
-import { apiConfig } from '../config/api';
-import { useUserStore } from '../store/user';
-import { useSessionStore } from '../store/session';
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
+import { showToast } from 'vant'
+import TabBar from '../components/TabBar.vue'
+import { useUserStore } from '../store/user'
+import { useSessionStore } from '../store/session'
+import { apiConfig } from '../config/api'
+import 'highlight.js/styles/github.css'
 
-// 从cookie中获取CSRF token
-const getCsrfToken = () => {
-  const cookieValue = document.cookie
-    .split('; ')
-    .find(row => row.startsWith('csrftoken='))
-    ?.split('=')[1];
-  return cookieValue || '';
-};
+const router = useRouter()
+const route = useRoute()
+const userStore = useUserStore()
+const sessionStore = useSessionStore()
 
-// 聊天消息
+const input = ref('')
+const loading = ref(false)
+const uploading = ref(false)
+const sessionId = ref('')
+const messagesEl = ref(null)
+const fileInput = ref(null)
+const uploadedFiles = ref([])
 const messages = ref([
-  { role: 'assistant', content: '你好！我是AI助手，有什么可以帮助你的吗？' }
-]);
-const userInput = ref('');
-const messagesContainer = ref(null);
-const isLoading = ref(false);
-const sessionId = ref('');
-const hasJumped = ref(false);
+  {
+    id: crypto.randomUUID(),
+    role: 'assistant',
+    content: '你好，我可以帮你基于资料回答问题。先登录，再上传材料或直接提问。',
+  },
+])
 
-const router = useRouter();
-const route = useRoute();
-const userStore = useUserStore();
-const sessionStore = useSessionStore();
+const tips = [
+  '请总结我上传资料中的核心观点。',
+  '把这份材料整理成三条行动建议。',
+  '找出文档里和风险、成本、时间有关的信息。',
+]
 
-// 配置marked使用marked-highlight插件
-marked.use(markedHighlight({
-  langPrefix: 'hljs language-',
-  highlight(code, lang) {
-    const language = hljs.getLanguage(lang) ? lang : 'plaintext';
-    return hljs.highlight(code, { language }).value;
+const statusText = computed(() => {
+  if (!userStore.getLoginStatus) return '未登录时无法保存会话'
+  if (sessionId.value) return `会话 ${sessionId.value.slice(0, 8)}`
+  return '准备开始新会话'
+})
+
+const renderMarkdown = (content) => {
+  return DOMPurify.sanitize(marked.parse(content || '', { breaks: true, gfm: true }))
+}
+
+const friendlyError = (message) => {
+  const text = String(message || '')
+  if (text.includes('dashscope.aliyuncs.com') || text.includes('SSLEOFError') || text.includes('HTTPSConnectionPool')) {
+    return '大模型服务连接中断了。请稍等几秒后重试；如果连续出现，请重启后端服务并检查网络或代理。'
   }
-}));
+  if (text.includes('401') || text.includes('api key') || text.includes('API key')) {
+    return '模型 API Key 可能无效，请检查 backend/.env 中的 ALIYUN_ACCESS_KEY_SECRET。'
+  }
+  return text || '请求失败，请检查后端服务。'
+}
 
-// 格式化消息内容（支持Markdown和代码高亮）
-const formatMessage = (content) => {
-  if (!content) return '';
+const scrollToBottom = async () => {
+  await nextTick()
+  if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
+}
+
+const formatSize = (size) => {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / 1024 / 1024).toFixed(1)} MB`
+}
+
+const authHeaders = () => {
+  const token = localStorage.getItem('jwt_token') || userStore.token
+  return token ? { Authorization: `Bearer ${token}` } : {}
+}
+
+const normalizeFileRecord = (file) => ({
+  id: file.file_id || file.id || crypto.randomUUID(),
+  name: file.filename || file.name || file.stored_filename || '未命名文件',
+  size: formatSize(Number(file.size || 0)),
+  time: file.uploaded_at ? new Date(file.uploaded_at).toLocaleString() : '',
+  downloadUrl: file.download_url || file.downloadUrl || '',
+  indexed: file.indexed !== false,
+})
+
+const loadUploadedFiles = async () => {
+  if (!userStore.getLoginStatus) return
   try {
-    // 使用marked解析Markdown，并用DOMPurify清理HTML
-    const parsed = marked(content, {
-      breaks: true,
-      gfm: true,
-      headerIds: false,
-      mangle: false
-    });
-    const sanitized = DOMPurify.sanitize(parsed);
-    return sanitized;
+    const response = await fetch(apiConfig.endpoints.listVectorFiles, { headers: authHeaders() })
+    if (!response.ok) throw new Error('获取资料列表失败')
+    const result = await response.json()
+    uploadedFiles.value = (result.data?.files || []).map(normalizeFileRecord)
   } catch (error) {
-    console.error('Markdown解析错误:', error);
-    return content;
+    console.warn(error)
   }
-};
+}
 
-// 发送消息
+const openUploadedFile = async (file) => {
+  if (!file.downloadUrl) return
+  try {
+    const response = await fetch(file.downloadUrl, { headers: authHeaders() })
+    if (!response.ok) throw new Error('无法打开文件')
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    window.open(url, '_blank', 'noopener')
+    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+  } catch (error) {
+    showToast(error.message || '无法打开文件')
+  }
+}
+
+const ensureLogin = () => {
+  if (userStore.getLoginStatus) return true
+  showToast('请先登录')
+  router.push('/login')
+  return false
+}
+
 const sendMessage = async () => {
-  if (!userInput.value.trim() || isLoading.value) return;
-  
-  // 检查是否登录
-  if (!userStore.getLoginStatus) {
-    showToast('请先登录');
-    return;
-  }
-  
-  // 添加用户消息
-  const userMessage = userInput.value.trim();
-  messages.value.push({ role: 'user', content: userMessage });
-  userInput.value = '';
-  
-  // 添加AI消息占位
-  messages.value.push({ role: 'assistant', content: '' });
-  
-  // 滚动到底部
-  await nextTick();
-  scrollToBottom();
-  
-  // 发送请求
-  isLoading.value = true;
-  try {
-    await fetchAIResponse(userMessage);
-  } catch (error) {
-    console.error('Error fetching AI response:', error);
-    // 更新最后一条消息为错误信息
-    messages.value[messages.value.length - 1].content = `发生错误: ${error.message || '请检查网络连接和API设置'}`;
-  } finally {
-    isLoading.value = false;
-    await nextTick();
-    scrollToBottom();
-  }
-};
+  const query = input.value.trim()
+  if (!query || loading.value || !ensureLogin()) return
 
-// 获取AI响应（使用SSE）
-const fetchAIResponse = async (userMessage) => {
+  messages.value.push({ id: crypto.randomUUID(), role: 'user', content: query })
+  const assistant = { id: crypto.randomUUID(), role: 'assistant', content: '', loading: true }
+  messages.value.push(assistant)
+  input.value = ''
+  loading.value = true
+  await scrollToBottom()
+
   try {
-    // 确保使用正确的相对路径，通过Vite代理访问
-    const url = '/api/agent/query/stream';
-    // 从localStorage获取token
-    const token = localStorage.getItem('jwt_token') || userStore.token;
-    // console.log('发送AI请求到:', url);
-    // console.log('使用的token:', token);
-    
-    const response = await fetch(url, {
+    const response = await fetch(apiConfig.endpoints.agentQueryStream, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
-      body: JSON.stringify({
-        session_id: sessionId.value || undefined,
-        query: userMessage
-      })
-    });
-    
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new Error(error.detail || `HTTP error! status: ${response.status}`);
-    }
-    
-    // 处理SSE流
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-    let aiResponse = '';
-  
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() || '';
-    
-    for (const line of lines) {
-      if (line.startsWith('data: ')) {
-        const data = line.slice(6);
-        if (!data) continue;
-        
-        try {
-          const json = JSON.parse(data);
-          
-          switch (json.type) {
-            case 'step':
-              break;
-            case 'response':
-              const content = json.content || '';
-              if (content) {
-                aiResponse += content;
-                
-                // 逐字符显示打字机效果
-                const displayContent = messages.value[messages.value.length - 1].content || '';
-                const remainingContent = aiResponse.substring(displayContent.length);
-                
-                for (const char of remainingContent) {
-                  messages.value[messages.value.length - 1].content += char;
-                  await nextTick();
-                  scrollToBottom();
-                  // 控制打字速度，每个字符延迟8ms
-                  await new Promise(resolve => setTimeout(resolve, 8));
-                }
-              }
-              // 保存会话ID（不立即跳转，避免中断SSE）
-              if (json.session_id && typeof json.session_id === 'string' && json.session_id.trim()) {
-                sessionId.value = json.session_id;
-              }
-              break;
-            case 'done':
-              // 保存会话ID并在所有数据接收完成后跳转
-              if (json.session_id && typeof json.session_id === 'string' && json.session_id.trim()) {
-                sessionId.value = json.session_id;
-                // 如果当前路由没有sessionId参数，跳转到带sessionId的路由
-                if (!route.params.sessionId) {
-                  router.push(`/aichat/${json.session_id}`);
-                }
-              }
-              break;
-            case 'error':
-              throw new Error(json.content || 'API错误');
-              break;
-          }
-        } catch (e) {
-          console.error('Error parsing SSE data:', e);
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ query, session_id: sessionId.value || undefined }),
+    })
+
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}))
+        throw new Error(error.detail || `请求失败：${response.status}`)
+      }
+
+    assistant.loading = false
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() || ''
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        const raw = line.slice(6).trim()
+        if (!raw) continue
+        const json = JSON.parse(raw)
+
+        if (json.type === 'response') {
+          assistant.content += json.content || ''
+          if (json.session_id) sessionId.value = json.session_id
         }
+        if (json.type === 'done' && json.session_id) {
+          sessionId.value = json.session_id
+          if (!route.params.sessionId) router.replace(`/aichat/${json.session_id}`)
+        }
+        if (json.type === 'error') throw new Error(json.content || '生成失败')
       }
+      await scrollToBottom()
     }
-  }
-  
-  // 如果没有收到任何内容
-  if (!aiResponse) {
-    messages.value[messages.value.length - 1].content = '抱歉，我无法生成回复。请检查API设置或稍后再试。';
-  }
+
+    if (!assistant.content) assistant.content = '没有收到内容，请稍后再试。'
   } catch (error) {
-    console.error('Fetch error:', error);
-    throw error;
+    assistant.loading = false
+    assistant.content = friendlyError(error.message)
+  } finally {
+    loading.value = false
+    await scrollToBottom()
   }
-};
+}
 
-// 跳转到会话管理页面
-const goToSessions = () => {
-  router.push('/sessions');
-};
-
-// 滚动到底部
-const scrollToBottom = () => {
-  if (messagesContainer.value) {
-    messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight;
+const loadSession = async (id) => {
+  if (!id || !ensureLogin()) return
+  const result = await sessionStore.getSession(id)
+  if (!result.success) {
+    showToast(result.message)
+    return
   }
-};
+  sessionId.value = id
+  const history = result.data.history || []
+  messages.value = history.length
+    ? history.flatMap(([user, assistant]) => [
+        { id: crypto.randomUUID(), role: 'user', content: user },
+        { id: crypto.randomUUID(), role: 'assistant', content: assistant },
+      ])
+    : messages.value
+  await scrollToBottom()
+}
 
-// 监听消息变化，自动滚动
-watch(messages, () => {
-  nextTick(() => {
-    scrollToBottom();
-  });
-}, { deep: true });
+const newChat = () => {
+  sessionId.value = ''
+  messages.value = [
+    { id: crypto.randomUUID(), role: 'assistant', content: '新会话已准备好。把问题发过来吧。' },
+  ]
+  router.push('/aichat')
+}
 
-// 监听路由参数变化，重新加载会话历史
-watch(() => route.params.sessionId, async (newSessionId) => {
-  if (newSessionId) {
-    try {
-      const result = await sessionStore.getSession(newSessionId);
-      if (result.success && sessionStore.currentSession) {
-        loadSessionHistory(sessionStore.currentSession);
-      } else {
-        showToast('加载会话历史失败');
-      }
-    } catch (error) {
-      console.error('加载会话历史失败:', error);
-      showToast('加载会话历史失败');
-    }
+const uploadFiles = async (event) => {
+  if (!ensureLogin()) return
+  const files = Array.from(event.target.files || [])
+  if (!files.length) return
+  uploading.value = true
+  try {
+    const formData = new FormData()
+    files.forEach((file) => formData.append(files.length > 1 ? 'files' : 'file', file))
+    const endpoint = files.length > 1 ? apiConfig.endpoints.uploadMultipleFiles : apiConfig.endpoints.uploadSingleFile
+    const response = await fetch(endpoint, { method: 'POST', headers: authHeaders(), body: formData })
+    if (!response.ok) throw new Error('上传失败')
+    await loadUploadedFiles()
+    messages.value.push({
+      id: crypto.randomUUID(),
+      role: 'assistant',
+      content: `已上传 ${files.length} 个文件到资料库：${files.map((file) => file.name).join('、')}。现在可以直接围绕这些资料提问。`,
+    })
+    await scrollToBottom()
+    showToast('资料已进入知识库')
+  } catch (error) {
+    showToast(error.message || '上传失败')
+  } finally {
+    uploading.value = false
+    if (fileInput.value) fileInput.value.value = ''
   }
-}, { immediate: true });
+}
 
-// 组件挂载时检查是否有当前会话或路由参数中的会话ID
-onMounted(async () => {
-  // 检查路由参数中是否有sessionId
-  const routeSessionId = route.params.sessionId;
-  
-  if (routeSessionId) {
-    // 从路由参数获取会话ID，加载会话历史
-    try {
-      const result = await sessionStore.getSession(routeSessionId);
-      if (result.success && sessionStore.currentSession) {
-        loadSessionHistory(sessionStore.currentSession);
-      } else {
-        showToast('加载会话历史失败');
-      }
-    } catch (error) {
-      console.error('加载会话历史失败:', error);
-      showToast('加载会话历史失败');
-    }
-  } else if (sessionStore.currentSession) {
-    // 从store中加载会话历史
-    loadSessionHistory(sessionStore.currentSession);
+const cleanVectors = async () => {
+  if (!ensureLogin()) return
+  try {
+    const response = await fetch(apiConfig.endpoints.cleanVectors, { method: 'DELETE', headers: authHeaders() })
+    if (!response.ok) throw new Error('清空失败')
+    uploadedFiles.value = []
+    saveUploadedFiles()
+    showToast('向量库已清空')
+  } catch (error) {
+    showToast(error.message || '清空失败')
   }
-  
-  scrollToBottom();
-});
+}
 
-// 加载会话历史
-const loadSessionHistory = (session) => {
-  if (session.history && session.history.length > 0) {
-    // 清空当前消息
-    messages.value = [];
-    // 加载历史消息
-    session.history.forEach(([userMsg, aiMsg]) => {
-      messages.value.push({ role: 'user', content: userMsg });
-      messages.value.push({ role: 'assistant', content: aiMsg });
-    });
-    // 设置会话ID
-    sessionId.value = session.session_id;
-  }
-};
+watch(() => route.params.sessionId, (id) => {
+  if (id) loadSession(id)
+})
+
+onMounted(() => {
+  if (route.params.sessionId) loadSession(route.params.sessionId)
+})
 </script>
 
 <style scoped>
-.ai-chat-container {
-  display: flex;
-  flex-direction: column;
+.chat-page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 18px;
   height: 100vh;
-  padding-top: 46px;
-  padding-bottom: 50px;
-  box-sizing: border-box;
 }
 
-.chat-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
+.chat-main {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: calc(100vh - 48px);
   overflow: hidden;
 }
 
-.messages-container {
-  flex: 1;
+.chat-header {
+  padding: 20px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.eyebrow {
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.chat-header h2 {
+  margin: 6px 0 4px;
+  font-size: 28px;
+}
+
+.chat-header p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.messages {
   overflow-y: auto;
-  padding: 10px;
+  padding: 20px;
 }
 
-.message {
-  margin-bottom: 10px;
-  max-width: 80%;
+.message-row {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 10px;
+  margin-bottom: 16px;
 }
 
-.user-message {
-  margin-left: auto;
+.message-row.user {
+  grid-template-columns: minmax(0, 1fr) 38px;
 }
 
-.ai-message {
-  margin-right: auto;
+.message-row.user .avatar {
+  grid-column: 2;
 }
 
-.message-content {
-  padding: 10px;
-  border-radius: 10px;
-  word-break: break-word;
+.message-row.user .bubble {
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: end;
+  background: #113d35;
+  color: #fff;
 }
 
-.user-message .message-content {
-  background-color: #007aff;
-  color: white;
+.avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius);
+  background: #e7ece8;
+  display: grid;
+  place-items: center;
+  font-weight: 800;
 }
 
-.ai-message .message-content {
-  background-color: #f2f2f2;
-  color: #333;
+.bubble {
+  max-width: 900px;
+  border: 1px solid var(--line);
+  background: #fff;
+  border-radius: var(--radius);
+  padding: 13px 15px;
+  line-height: 1.7;
 }
 
-.input-container {
-  display: flex;
-  padding: 10px;
-  border-top: 1px solid #eee;
-  background-color: #fff;
+.typing {
+  color: var(--muted);
 }
 
-.chat-input {
-  flex: 1;
-  margin-right: 10px;
+.markdown :deep(p) {
+  margin: 0 0 10px;
 }
 
-.send-button {
-  align-self: flex-end;
+.markdown :deep(p:last-child) {
+  margin-bottom: 0;
 }
 
-/* Markdown 样式 */
-.message-content pre {
-  background-color: #f8f8f8;
-  padding: 10px;
-  border-radius: 5px;
+.markdown :deep(pre) {
   overflow-x: auto;
+  padding: 12px;
+  border-radius: var(--radius);
+  background: #1f2724;
+  color: #eef5f1;
 }
 
-.message-content code {
-  background-color: rgba(0, 0, 0, 0.05);
-  padding: 2px 4px;
-  border-radius: 3px;
+.composer {
+  border-top: 1px solid var(--line);
+  padding: 14px;
+  background: #f9fbf8;
 }
 
-.message-content img {
-  max-width: 100%;
+.composer textarea {
+  resize: none;
 }
 
-/* 打字指示器 */
-.typing-indicator {
+.composer-footer {
+  margin-top: 10px;
   display: flex;
-  padding: 5px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
 }
 
-.typing-indicator span {
-  height: 8px;
-  width: 8px;
-  background-color: #999;
-  border-radius: 50%;
-  margin: 0 2px;
-  display: inline-block;
-  animation: bounce 1.5s infinite ease-in-out;
+.right-rail {
+  display: grid;
+  gap: 18px;
+  align-content: start;
 }
 
-.typing-indicator span:nth-child(2) {
-  animation-delay: 0.2s;
+.knowledge-panel {
+  overflow: visible;
 }
 
-.typing-indicator span:nth-child(3) {
-  animation-delay: 0.4s;
+.rail-body {
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
-@keyframes bounce {
-  0%, 60%, 100% {
-    transform: translateY(0);
-  }
-  30% {
-    transform: translateY(-5px);
-  }
+.rail-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
 }
 
-/* Markdown样式 */
-:deep(pre) {
-  background-color: #1e1e1e;
-  padding: 15px;
-  border-radius: 6px;
-  overflow-x: auto;
-  margin: 10px 0;
-  color: #d4d4d4;
+.rail-body h3,
+.tips-panel h3 {
+  margin: 0;
 }
 
-:deep(pre code) {
-  background-color: transparent;
-  padding: 0;
-  border-radius: 0;
-  color: #d4d4d4;
+.rail-body p {
+  margin: 0;
+  color: var(--muted);
 }
 
-:deep(code) {
-  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
-  background-color: rgba(0, 0, 0, 0.05);
-  padding: 2px 6px;
-  border-radius: 4px;
-  font-size: 0.9em;
+.rail-title strong {
+  min-width: 38px;
+  height: 38px;
+  border-radius: var(--radius);
+  background: #e4f3ee;
+  color: var(--accent);
+  display: grid;
+  place-items: center;
 }
 
-:deep(p) {
-  margin: 8px 0;
-  line-height: 1.5;
+.upload-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 4px;
 }
 
-:deep(ul), :deep(ol) {
-  padding-left: 20px;
-  margin: 8px 0;
+.upload-item {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  padding: 10px;
+  display: grid;
+  gap: 4px;
 }
 
-:deep(li) {
-  margin: 4px 0;
-  line-height: 1.5;
+.upload-item span {
+  font-weight: 800;
+  word-break: break-all;
 }
 
-:deep(a) {
-  color: #1989fa;
-  text-decoration: none;
+.upload-item small,
+.upload-empty {
+  color: var(--muted);
 }
 
-:deep(a:hover) {
-  text-decoration: underline;
+.upload-empty {
+  border: 1px dashed #b9cbc2;
+  border-radius: var(--radius);
+  padding: 12px;
+  background: #fbfdfb;
 }
 
-:deep(h1), :deep(h2), :deep(h3), :deep(h4), :deep(h5), :deep(h6) {
-  margin: 12px 0 8px 0;
-  font-weight: bold;
+.hidden-input {
+  display: none;
 }
 
-:deep(h1) {
-  font-size: 1.5em;
+.tips-panel {
+  padding: 16px;
 }
 
-:deep(h2) {
-  font-size: 1.3em;
-}
-
-:deep(h3) {
-  font-size: 1.1em;
-}
-
-:deep(blockquote) {
-  border-left: 4px solid #1989fa;
-  padding-left: 10px;
-  margin: 10px 0;
-  color: #666;
-  background-color: #f9f9f9;
-  padding: 8px 12px;
-  border-radius: 0 4px 4px 0;
-}
-
-:deep(hr) {
-  border: 0;
-  border-top: 1px solid #eee;
-  margin: 16px 0;
-}
-
-:deep(img) {
-  max-width: 100%;
-  border-radius: 4px;
-  margin: 8px 0;
-}
-
-:deep(table) {
+.tip {
   width: 100%;
-  border-collapse: collapse;
-  margin: 10px 0;
-}
-
-:deep(th), :deep(td) {
-  border: 1px solid #ddd;
-  padding: 8px;
   text-align: left;
+  margin-top: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fff;
+  padding: 12px;
+  color: #39443f;
 }
 
-:deep(th) {
-  background-color: #f2f2f2;
-  font-weight: bold;
+@media (max-width: 980px) {
+  .chat-page {
+    grid-template-columns: 1fr;
+    height: auto;
+  }
+
+  .chat-main {
+    min-height: calc(100vh - 96px);
+  }
+
+  .right-rail {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 620px) {
+  .chat-header {
+    flex-direction: column;
+  }
+
+  .header-actions {
+    width: 100%;
+  }
+
+  .header-actions .btn {
+    flex: 1;
+  }
 }
 </style>

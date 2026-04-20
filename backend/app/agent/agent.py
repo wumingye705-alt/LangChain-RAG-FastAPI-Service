@@ -14,6 +14,7 @@ from app.agent.agent_middleware import get_middleware
 from app.agent.agent_tools import rag_summary_tools, get_weather_tools, what_time_is_now, get_user_info_tools, \
     reorder_documents_tools
 from app.core.logger_handler import logger
+from app.rag.rag_service import RagService
 from app.services import session_manager as sm
 from app.utils.prompt_loader import load_prompt
 
@@ -227,6 +228,17 @@ async def get_agent_stream_response(
 
         # 获取会话历史
         history = await sm.session_manager.get_history(session_id, user_id)
+        yield f"data: {json.dumps({'type': 'response', 'content': '', 'session_id': session_id}, ensure_ascii=False)}\n\n"
+
+        rag_result = await RagService().get_documents_and_summary(query, user_id=user_id)
+        response = rag_result.get("summary") or "没有从你上传的资料中检索到可用内容，请先上传资料后再提问。"
+        for i in range(0, len(response), 80):
+            yield f"data: {json.dumps({'type': 'response', 'content': response[i:i + 80]}, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(0.02)
+
+        await sm.session_manager.add_message(session_id, user_id, query, response)
+        yield f"data: {json.dumps({'type': 'done', 'session_id': session_id}, ensure_ascii=False)}\n\n"
+        return
         logger.info(f"【Agent流式响应】获取会话历史成功，历史记录数: {len(history)}")
 
         # 构建聊天历史

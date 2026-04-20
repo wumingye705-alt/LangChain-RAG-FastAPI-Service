@@ -32,6 +32,7 @@ class UploadAPIView(APIView):
             filename = uuid() + os.path.splitext(img.name)[1]
             # 保存文件到media/img目录
             filepath = settings.MEDIA_ROOT / 'img' / filename
+            os.makedirs(filepath.parent, exist_ok=True)
             try:
                 with open(filepath, 'wb') as f:
                     for chunk in img.chunks():

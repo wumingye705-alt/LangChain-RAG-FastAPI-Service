@@ -1,322 +1,117 @@
 <template>
-  <div class="sessions-container">
-    <van-nav-bar title="会话管理" fixed />
-    
-    <div class="sessions-content">
-      <div class="sessions-header">
-        <div class="header-title">
-          <van-icon name="chat-o" size="24" color="#1989fa" />
-          <h2>历史会话</h2>
+  <div class="app-shell">
+    <TabBar />
+    <main class="page">
+      <header class="topbar">
+        <div>
+          <h2>会话管理</h2>
+          <p>继续旧问题，或者清理不需要的记录。</p>
         </div>
-        <van-button type="primary" @click="createNewSession">
-          新会话
-        </van-button>
-      </div>
-      
-      <div v-if="sessionStore.isLoading" class="loading">
-        <van-loading type="spinner" color="#1989fa" />
-        <p>加载中...</p>
-      </div>
-      
-      <div v-else-if="sessionStore.sessions.length === 0" class="empty-sessions">
-        <van-icon name="chat-o" size="64" color="#ccc" />
-        <p>暂无会话记录</p>
-        <van-button type="primary" @click="createNewSession">
-          创建新会话
-        </van-button>
-      </div>
-      
-      <div v-else class="sessions-list">
-        <van-cell-group>
-          <van-cell
-            v-for="session in sessionStore.sessions"
-            :key="session.session_id"
-            :title="session.title || '新会话'"
-            :value="formatSessionTime(session.created_at)"
-            is-link
-            @click="selectSession(session)"
-            :class="{ active: sessionStore.currentSession?.session_id === session.session_id }"
-          >
-            <template #right-icon>
-              <van-button
-                type="danger"
-                plain
-                size="small"
-                @click.stop="deleteSession(session.session_id)"
-              >
-                删除
-              </van-button>
-            </template>
-          </van-cell>
-        </van-cell-group>
-      </div>
-    </div>
-    
-    <!-- 新会话对话框 -->
-    <van-popup v-model:show="showNewSessionDialog" position="bottom">
-      <div class="new-session-dialog">
-        <h3>新会话</h3>
-        <van-field
-          v-model="newSessionQuery"
-          type="textarea"
-          rows="3"
-          placeholder="请输入您的问题..."
-          maxlength="200"
-        />
-        <div class="dialog-buttons">
-          <van-button @click="showNewSessionDialog = false">取消</van-button>
-          <van-button type="primary" @click="confirmNewSession" :disabled="!newSessionQuery.trim()">
-            开始对话
-          </van-button>
-        </div>
-      </div>
-    </van-popup>
-    
-    <tab-bar />
+        <button class="btn primary" @click="router.push('/aichat')">开始新会话</button>
+      </header>
+
+      <section class="sessions-grid">
+        <article v-if="!userStore.getLoginStatus" class="panel empty-state">
+          登录后可以查看属于你的会话。
+          <button class="btn primary" @click="router.push('/login')">去登录</button>
+        </article>
+
+        <article v-else-if="loading" class="panel empty-state">正在读取会话...</article>
+
+        <article v-else-if="sessions.length === 0" class="panel empty-state">
+          还没有会话。发出第一个问题后，这里会出现记录。
+        </article>
+
+        <article v-for="session in sessions" v-else :key="session.session_id" class="session-card panel">
+          <div>
+            <span>{{ formatDate(session.updated_at || session.created_at) }}</span>
+            <h3>{{ session.title || '未命名会话' }}</h3>
+            <p>{{ session.session_id }}</p>
+          </div>
+          <div class="card-actions">
+            <button class="btn primary" @click="openSession(session)">打开</button>
+            <button class="btn danger" @click="removeSession(session.session_id)">删除</button>
+          </div>
+        </article>
+      </section>
+    </main>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue';
-import { useRouter, useRoute } from 'vue-router';
-import { showToast, Toast } from 'vant';
-import TabBar from '../components/TabBar.vue';
-import { useSessionStore } from '../store/session';
-import { useUserStore } from '../store/user';
+import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { showToast } from 'vant'
+import TabBar from '../components/TabBar.vue'
+import { useUserStore } from '../store/user'
+import { useSessionStore } from '../store/session'
 
-const router = useRouter();
-const route = useRoute();
-const sessionStore = useSessionStore();
-const userStore = useUserStore();
+const router = useRouter()
+const userStore = useUserStore()
+const sessionStore = useSessionStore()
+const loading = ref(false)
+const sessions = computed(() => sessionStore.sessions)
 
-const showNewSessionDialog = ref(false);
-const newSessionQuery = ref('');
+const load = async () => {
+  if (!userStore.getLoginStatus) return
+  if (!userStore.userInfo) await userStore.getUserInfoDetail()
+  const userId = userStore.userInfo?.id || userStore.userInfo?.uuid
+  if (!userId) return
+  loading.value = true
+  const result = await sessionStore.getUserSessions(userId)
+  loading.value = false
+  if (!result.success) showToast(result.message)
+}
 
-// 监听路由变化，确保每次访问会话管理页面时自动刷新会话列表
-watch(() => route.path, async (newPath) => {
-  if (newPath === '/sessions') {
-    await loadSessions();
-  }
-});
+const openSession = (session) => {
+  router.push(`/aichat/${session.session_id}`)
+}
 
-// 加载会话列表
-const loadSessions = async () => {
-  // 检查是否登录
-  if (!userStore.getLoginStatus) {
-    showToast('请先登录');
-    router.push('/login');
-    return;
-  }
-  
-  // 获取用户ID（假设从用户信息中获取）
-  if (!userStore.userInfo) {
-    const result = await userStore.getUserInfoDetail();
-    if (!result.success) {
-      showToast('获取用户信息失败');
-      return;
-    }
-  }
-  
-  if (userStore.userInfo) {
+const removeSession = async (id) => {
+  const result = await sessionStore.deleteSession(id)
+  showToast(result.message)
+}
 
-    
-    // 尝试获取用户ID，支持不同的字段名
-    let userId = userStore.userInfo.uuid || userStore.userInfo.id || userStore.userInfo.user_id;
-    
-    if (userId) {
-      await sessionStore.getUserSessions(userId);
-    } else {
-      // 显示详细的错误信息
-      showToast('获取用户ID失败，请检查用户信息结构');
-      console.error('用户信息中没有找到ID字段:', userStore.userInfo);
-    }
-  } else {
-    showToast('获取用户信息失败');
-  }
-};
+const formatDate = (value) => {
+  if (!value) return '暂无时间'
+  return new Date(value).toLocaleString()
+}
 
-// 组件挂载时获取会话列表
-onMounted(async () => {
-  await loadSessions();
-});
-
-// 获取会话标题（使用第一条消息作为标题）
-const getSessionTitle = (session) => {
-  if (session.history && session.history.length > 0) {
-    const firstMessage = session.history[0][0]; // 第一条用户消息
-    return firstMessage.length > 20 ? firstMessage.substring(0, 20) + '...' : firstMessage;
-  }
-  return '新会话';
-};
-
-// 格式化会话时间
-const formatSessionTime = (timeString) => {
-  if (!timeString) return '';
-  try {
-    const date = new Date(timeString);
-    return date.toLocaleString('zh-CN', {
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  } catch (error) {
-    return timeString;
-  }
-};
-
-// 选择会话
-const selectSession = (session) => {
-  // 跳转到带会话ID的路由
-  router.push(`/aichat/${session.session_id}`);
-};
-
-// 删除会话
-const deleteSession = async (sessionId) => {
-
-  
-  const result = await sessionStore.deleteSession(sessionId);
-  if (result.success) {
-    showToast('会话删除成功');
-  } else {
-    showToast(result.message || '删除失败');
-  }
-};
-
-// 打开新会话对话框
-const createNewSession = () => {
-  showNewSessionDialog.value = true;
-};
-
-// 确认创建新会话
-const confirmNewSession = async () => {
-  if (!newSessionQuery.value.trim()) return;
-  
-  // 显示加载状态，保存返回的toast实例
-  const toastInstance = showToast({
-    type: 'loading',
-    message: '创建会话中...',
-    forbidClick: true,
-    duration: 0
-  });
-  
-  try {
-    const result = await sessionStore.createSession(newSessionQuery.value);
-    if (result.success && result.data?.session_id) {
-      showToast('会话创建成功');
-      showNewSessionDialog.value = false;
-      newSessionQuery.value = '';
-      // 跳转到带会话ID的聊天页面
-      router.push(`/aichat/${result.data.session_id}`);
-    } else {
-      showToast(result.message || '创建会话失败');
-    }
-  } catch (error) {
-    showToast('创建会话失败');
-    console.error('创建会话失败:', error);
-  } finally {
-    // 使用toast实例的关闭方法
-    if (toastInstance && toastInstance.close) {
-      toastInstance.close();
-    }
-  }
-};
+onMounted(load)
 </script>
 
 <style scoped>
-.sessions-container {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-  padding-top: 46px;
-  padding-bottom: 50px;
-  box-sizing: border-box;
-  background-color: #f7f8fa;
+.sessions-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
 }
 
-.sessions-content {
-  flex: 1;
-  padding: 16px;
-  overflow-y: auto;
+.session-card {
+  padding: 18px;
+  display: grid;
+  gap: 18px;
 }
 
-.sessions-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 20px;
+.session-card span {
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 800;
 }
 
-.header-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.sessions-header h2 {
+.session-card h3 {
+  margin: 8px 0;
   font-size: 18px;
-  font-weight: bold;
-  color: #333;
+}
+
+.session-card p {
   margin: 0;
+  color: var(--muted);
+  word-break: break-all;
 }
 
-.loading {
+.card-actions {
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 300px;
-}
-
-.loading p {
-  margin-top: 16px;
-  color: #666;
-}
-
-.empty-sessions {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  height: 300px;
-}
-
-.empty-sessions p {
-  margin: 16px 0;
-  color: #999;
-}
-
-.sessions-list {
-  margin-top: 10px;
-}
-
-.active {
-  background-color: #f0f9ff !important;
-}
-
-.new-session-dialog {
-  background-color: #fff;
-  border-radius: 16px 16px 0 0;
-  padding: 20px;
-}
-
-.new-session-dialog h3 {
-  font-size: 18px;
-  font-weight: bold;
-  color: #333;
-  margin: 0 0 20px 0;
-  text-align: center;
-}
-
-.dialog-buttons {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 20px;
-}
-
-.dialog-buttons van-button {
-  flex: 1;
-  margin: 0 5px;
+  gap: 8px;
 }
 </style>

@@ -1,7 +1,16 @@
 from typing import List, Optional, Tuple, Dict, Any
 import uuid
-import magic
 import os
+import sys
+from pathlib import Path
+
+if sys.platform.startswith("win"):
+    libmagic_dir = Path(sys.prefix) / "Lib" / "site-packages" / "magic" / "libmagic"
+    if libmagic_dir.exists():
+        os.environ["PATH"] = f"{libmagic_dir}{os.pathsep}{os.environ.get('PATH', '')}"
+        os.add_dll_directory(str(libmagic_dir))
+
+import magic
 
 from fastapi import HTTPException, UploadFile
 
@@ -33,10 +42,10 @@ class ChatService:
 
         return session_id, response, steps
 
-    async def handle_rag_query(self, query: str) -> str:
+    async def handle_rag_query(self, query: str, user_id: str = None) -> str:
         """处理 RAG 查询逻辑"""
         rag_service = RagService()
-        response = await rag_service.rag_summary(query)
+        response = await rag_service.rag_summary(query, user_id=user_id)
         return response
 
     async def handle_get_session(self, session_id: str, user_id: str) -> List[Tuple[str, str]]:
@@ -134,6 +143,18 @@ class ChatService:
         store = VectorStoreService()
         # 删除用户的所有文档
         await store.delete_user_documents(user_id)
+        await store.clear_user_files(user_id)
+
+    async def handle_list_user_files(self, user_id: str) -> List[Dict[str, Any]]:
+        store = VectorStoreService()
+        return await store.list_user_files(user_id)
+
+    async def handle_get_user_file(self, user_id: str, file_id: str) -> Dict[str, Any]:
+        store = VectorStoreService()
+        record = await store.get_user_file_record(user_id, file_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="File not found")
+        return record
 
     async def handle_reorder(self, query: str, documents: List[str]) -> List[Dict[str, Any]]:
         """
